@@ -38,3 +38,7 @@ Upload the contents of this folder to a repository and enable **Settings → Pag
 - JSZip — MIT
 
 See `licenses/REAL_ESRGAN_BSD_3_CLAUSE.txt` for the model attribution notice.
+
+
+### Performance update
+This version uses the compact Real-ESRGAN general x4v3 model (~4.6 MB) instead of the 32 MB x4plus FP16 model. The model is downloaded only when AI is actually needed, shows download progress, prefers WebGPU, and falls back to WASM. Auto mode uses AI only when the source crop is materially below the required output size; otherwise it uses high-quality browser resizing for speed.

@@ -124,3 +124,4 @@ footer { width:min(1180px,92vw); margin:0 auto; padding:22px 0 40px; color:#5c65
   .field-row { grid-template-columns:1fr; }
   footer { flex-direction:column; gap:6px; }
 }
+.model-download{margin-top:12px;padding:10px 0 0}.model-download .progress-track{height:6px;background:rgba(255,255,255,.08);border-radius:99px;overflow:hidden}.model-download .progress-bar{height:100%;width:0;background:linear-gradient(90deg,#d6ff5c,#9fd7ff);border-radius:99px;transition:width .15s ease}

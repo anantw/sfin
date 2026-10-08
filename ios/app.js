@@ -10,8 +10,7 @@ const PRESETS = [
   { id: 'texture', name: 'Texture', w: 2048, h: 2048, ratio: 1, purpose: 'Marble theme background · seamless tile', guide: '', focalX: 0.50 },
 ];
 
-const MODEL_FP16 = 'https://huggingface.co/skillsafe-ai/realesrgan-x4plus/resolve/main/model_fp16.onnx';
-const MODEL_FP32 = 'https://huggingface.co/skillsafe-ai/realesrgan-x4plus/resolve/main/model.onnx';
+const MODEL_URL = 'https://models.skillsafe.ai/realesr-general-x4v3-fp32@0.2.5.0/model.onnx';
 const ORT_VERSION = '1.30.0';
 const ORT_WASM = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
 
@@ -24,6 +23,9 @@ let outputs = new Map();
 let ortSession = null;
 let ortBackend = null;
 let modelKind = null;
+let modelBytes = null;
+let modelLoadPromise = null;
+let activeAIStartedAt = 0;
 
 const $ = (id) => document.getElementById(id);
 const fileInput = $('fileInput');
@@ -167,15 +169,18 @@ function highQualityResize(canvas, width, height) {
 async function makeAsset(preset) {
   const srcCanvas = getSourceCanvas();
   let crop = cropToAspect(srcCanvas, preset.ratio, focalX);
-  const needAI = aiMode === 'on' || (aiMode === 'auto' && (crop.width < preset.w || crop.height < preset.h));
+  const needAI = aiMode === 'on' || (aiMode === 'auto' && (crop.width < preset.w * 0.72 || crop.height < preset.h * 0.72));
   let colorCanvas;
   let alphaCanvas = null;
   const hasAlpha = srcCanvas.getContext('2d').getImageData(0,0,1,1).data[3] < 255 || sourceFile?.type === 'image/png';
 
   if (needAI) {
     const aiInput = chooseAIInput(crop, preset);
-    setProgress(`AI upscaling ${preset.name}…`, progressForPreset(preset, 0.42));
+    setProgress(`AI enhancing ${preset.name}…`, progressForPreset(preset, 0.22));
+    activeAIStartedAt = performance.now();
     colorCanvas = await runRealESRGAN(aiInput.canvas);
+    const aiSecs = ((performance.now() - activeAIStartedAt) / 1000).toFixed(1);
+    setProgress(`${preset.name} AI complete · ${aiSecs}s`, progressForPreset(preset, 0.72));
     colorCanvas = highQualityResize(colorCanvas, preset.w, preset.h);
     if (hasAlpha) {
       const sourceAlpha = extractAlpha(crop);
@@ -241,33 +246,27 @@ async function canvasToBlob(canvas, format, quality, alphaCanvas=null) {
 }
 
 async function runRealESRGAN(canvas) {
+  if (!ortSession) await initOrt();
   const {data,width,height} = canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height);
   const chw = new Float32Array(width*height*3);
-  for (let y=0; y<height; y++) {
-    for (let x=0; x<width; x++) {
-      const i=(y*width+x)*4;
-      const p=y*width+x;
-      chw[p] = data[i]/255;
-      chw[width*height+p] = data[i+1]/255;
-      chw[2*width*height+p] = data[i+2]/255;
-    }
+  const plane = width*height;
+  for (let p=0, i=0; p<plane; p++, i+=4) {
+    chw[p] = data[i] / 255;
+    chw[plane+p] = data[i+1] / 255;
+    chw[2*plane+p] = data[i+2] / 255;
   }
   const tensor = new ort.Tensor('float32', chw, [1,3,height,width]);
-  if (!ortSession) await initOrt();
   const result = await ortSession.run({input:tensor});
   const output = result.output || result[Object.keys(result)[0]];
   const [, , oh, ow] = output.dims;
-  const rgba = new Uint8ClampedArray(ow*oh*4);
   const vals = output.data;
-  const plane = ow*oh;
-  for (let y=0; y<oh; y++) {
-    for (let x=0; x<ow; x++) {
-      const p=y*ow+x, i=p*4;
-      rgba[i] = clampByte(vals[p]*255);
-      rgba[i+1] = clampByte(vals[plane+p]*255);
-      rgba[i+2] = clampByte(vals[2*plane+p]*255);
-      rgba[i+3] = 255;
-    }
+  const outPlane = ow*oh;
+  const rgba = new Uint8ClampedArray(outPlane*4);
+  for (let p=0, i=0; p<outPlane; p++, i+=4) {
+    rgba[i] = clampByte(vals[p]*255);
+    rgba[i+1] = clampByte(vals[outPlane+p]*255);
+    rgba[i+2] = clampByte(vals[2*outPlane+p]*255);
+    rgba[i+3] = 255;
   }
   const out = document.createElement('canvas'); out.width=ow; out.height=oh;
   out.getContext('2d').putImageData(new ImageData(rgba,ow,oh),0,0);
@@ -275,36 +274,80 @@ async function runRealESRGAN(canvas) {
 }
 
 async function initOrt() {
-  if (!window.ort) throw new Error('ONNX Runtime Web did not load. Check your internet connection or script blockers.');
-  ort.env.wasm.wasmPaths = ORT_WASM;
-  ort.env.wasm.numThreads = 1;
+  if (ortSession) return ortSession;
+  if (modelLoadPromise) return modelLoadPromise;
+  if (!window.ort) throw new Error('ONNX Runtime Web did not load. Check your internet connection or a browser content blocker.');
 
-  const preferGPU = !!navigator.gpu;
-  const candidates = [];
-  if (preferGPU) candidates.push({url:MODEL_FP16, backend:'WebGPU · FP16', providers:['webgpu']});
-  if (preferGPU) candidates.push({url:MODEL_FP32, backend:'WebGPU · FP32', providers:['webgpu']});
-  candidates.push({url:MODEL_FP32, backend:'WASM · CPU fallback', providers:['wasm']});
+  modelLoadPromise = (async () => {
+    ort.env.wasm.wasmPaths = ORT_WASM;
+    ort.env.wasm.numThreads = 1;
+    const providers = navigator.gpu ? ['webgpu', 'wasm'] : ['wasm'];
+    $('modelStatus').textContent = 'Downloading compact 4.6 MB AI model…';
+    setStatus('Loading fast AI model…');
+    setModelDownload(0);
 
-  let lastErr = null;
-  for (const c of candidates) {
+    if (!modelBytes) {
+      const response = await fetch(MODEL_URL, { mode: 'cors', cache: 'force-cache' });
+      if (!response.ok) throw new Error(`AI model download failed (${response.status}).`);
+      const total = Number(response.headers.get('content-length')) || 0;
+      const reader = response.body?.getReader();
+      if (reader && total) {
+        const chunks=[]; let received=0;
+        while (true) {
+          const {done,value}=await reader.read();
+          if (done) break;
+          chunks.push(value); received += value.byteLength;
+          setModelDownload((received/total)*100);
+        }
+        const all = new Uint8Array(received);
+        let offset=0; for (const c of chunks) { all.set(c,offset); offset += c.byteLength; }
+        modelBytes = all;
+      } else {
+        modelBytes = new Uint8Array(await response.arrayBuffer());
+        setModelDownload(100);
+      }
+    }
+
+    const t0 = performance.now();
+    setStatus('Compiling AI model…');
+    $('modelStatus').textContent = 'Compiling WebGPU AI model…';
     try {
-      setStatus(`Loading ${c.backend} model…`);
-      $('modelStatus').textContent = `${c.backend} · first run downloads the model.`;
-      ortSession = await ort.InferenceSession.create(c.url, {
-        executionProviders: c.providers,
+      ortSession = await ort.InferenceSession.create(modelBytes, {
+        executionProviders: providers,
         graphOptimizationLevel: 'all',
       });
-      ortBackend = c.backend;
-      modelKind = c.url.endsWith('fp16.onnx') ? 'fp16' : 'fp32';
-      $('modelStatus').textContent = `${ortBackend} · model ready and cached by the browser.`;
-      setStatus(`${ortBackend} active`);
-      return;
+      ortBackend = providers[0] === 'webgpu' ? 'WebGPU · Real-ESRGAN x4v3' : 'WASM · Real-ESRGAN x4v3';
     } catch (err) {
-      console.warn('Model/provider failed', c, err);
-      lastErr = err;
+      if (providers[0] === 'webgpu') {
+        console.warn('WebGPU session failed; retrying on WASM.', err);
+        ortSession = await ort.InferenceSession.create(modelBytes, {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'all',
+        });
+        ortBackend = 'WASM · Real-ESRGAN x4v3 fallback';
+      } else throw err;
     }
-  }
-  throw new Error(`Could not initialize the AI upscaler. ${lastErr?.message || ''}`);
+    modelKind = 'x4v3';
+    const secs = ((performance.now()-t0)/1000).toFixed(1);
+    $('modelStatus').textContent = `${ortBackend} · ready in ${secs}s · model cached by browser.`;
+    setStatus(`${ortBackend} active`);
+    setModelDownload(100);
+    return ortSession;
+  })();
+
+  try { return await modelLoadPromise; }
+  finally { modelLoadPromise = null; }
+}
+
+function setModelDownload(pct) {
+  const wrap = $('modelDownloadWrap');
+  const bar = $('modelDownloadBar');
+  const label = $('modelDownloadLabel');
+  if (!wrap || !bar || !label) return;
+  wrap.hidden = false;
+  const n = Math.max(0, Math.min(100, pct));
+  bar.style.width = `${n}%`;
+  label.textContent = n >= 100 ? 'AI model ready' : `AI model download · ${Math.round(n)}%`;
 }
 
 function seamlessMirror(base) {
@@ -363,6 +406,7 @@ function progressForPreset(preset, local) {
 function resetAll() {
   source=null; sourceFile=null; outputs.forEach(v=>URL.revokeObjectURL(v.url)); outputs.clear();
   if (ortSession) { try { ortSession.release(); } catch {} ortSession=null; }
+  modelBytes = null; modelLoadPromise = null; setModelDownload(0);
   assetGrid.innerHTML='<div class="empty-state"><div class="empty-orb">✦</div><strong>Your four assets will appear here.</strong><span>Full Screen · Hero · Square · Texture</span></div>';
   generateBtn.disabled=true; downloadAllBtn.disabled=true; fileInput.value='';
   setStatus('Ready'); $('modelStatus').textContent='Real-ESRGAN will load on demand.';
