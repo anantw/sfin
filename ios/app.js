@@ -1,5 +1,5 @@
 /* iOS Asset Forge
- * Client-side image processor. AI model is fetched from a public Hugging Face file;
+ * Client-side image processor. AI model is fetched from a browser-compatible public Hugging Face file;
  * inference runs locally with ONNX Runtime Web and WebGPU where available.
  */
 
@@ -10,7 +10,10 @@ const PRESETS = [
   { id: 'texture', name: 'Texture', w: 2048, h: 2048, ratio: 1, purpose: 'Marble theme background · seamless tile', guide: '', focalX: 0.50 },
 ];
 
-const MODEL_URL = 'https://models.skillsafe.ai/realesr-general-x4v3-fp32@0.2.5.0/model.onnx';
+const MODEL_URLS = [
+  'https://huggingface.co/skillsafe-ai/realesr-general-x4v3/resolve/042a40bc4c918349ad3e2e607a68ae509a4c27b5/model.onnx',
+  'https://huggingface.co/skillsafe-ai/realesr-general-x4v3/resolve/main/model.onnx',
+];
 const ORT_VERSION = '1.30.0';
 const ORT_WASM = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ORT_VERSION}/dist/`;
 
@@ -287,24 +290,38 @@ async function initOrt() {
     setModelDownload(0);
 
     if (!modelBytes) {
-      const response = await fetch(MODEL_URL, { mode: 'cors', cache: 'force-cache' });
-      if (!response.ok) throw new Error(`AI model download failed (${response.status}).`);
-      const total = Number(response.headers.get('content-length')) || 0;
-      const reader = response.body?.getReader();
-      if (reader && total) {
-        const chunks=[]; let received=0;
-        while (true) {
-          const {done,value}=await reader.read();
-          if (done) break;
-          chunks.push(value); received += value.byteLength;
-          setModelDownload((received/total)*100);
+      let lastError = null;
+      for (const modelUrl of MODEL_URLS) {
+        try {
+          $('modelStatus').textContent = `Downloading 4.6 MB AI model…`;
+          const response = await fetch(modelUrl, { mode: 'cors', cache: 'force-cache' });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const total = Number(response.headers.get('content-length')) || 0;
+          const reader = response.body?.getReader();
+          if (reader && total) {
+            const chunks=[]; let received=0;
+            while (true) {
+              const {done,value}=await reader.read();
+              if (done) break;
+              chunks.push(value); received += value.byteLength;
+              setModelDownload((received/total)*100);
+            }
+            const all = new Uint8Array(received);
+            let offset=0; for (const c of chunks) { all.set(c,offset); offset += c.byteLength; }
+            modelBytes = all;
+          } else {
+            modelBytes = new Uint8Array(await response.arrayBuffer());
+            setModelDownload(100);
+          }
+          setStatus('AI model downloaded');
+          break;
+        } catch (err) {
+          lastError = err;
+          console.warn('AI model source failed:', modelUrl, err);
         }
-        const all = new Uint8Array(received);
-        let offset=0; for (const c of chunks) { all.set(c,offset); offset += c.byteLength; }
-        modelBytes = all;
-      } else {
-        modelBytes = new Uint8Array(await response.arrayBuffer());
-        setModelDownload(100);
+      }
+      if (!modelBytes) {
+        throw new Error(`AI model download failed. The previous model host returned 403 because it blocks requests from other sites. Hugging Face could not be reached either. Try again or disable a browser/network blocker. ${lastError?.message || ''}`.trim());
       }
     }
 
