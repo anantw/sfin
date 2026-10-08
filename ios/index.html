@@ -1,1 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b1020" />
+  <meta name="description" content="Generate iOS app artwork from one source image with WebGPU AI upscaling, exact presets, safe-zone guides and ZIP export." />
+  <title>iOS Asset Forge</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">AF</div>
+      <div>
+        <div class="brand-title">iOS Asset Forge</div>
+        <div class="brand-sub">Local-first image prep for app design</div>
+      </div>
+    </div>
+    <div class="status-pill" id="runtimeStatus"><span class="status-dot"></span> Ready</div>
+  </header>
 
+  <main class="shell">
+    <section class="hero-copy">
+      <div>
+        <div class="eyebrow">ONE IMAGE → FOUR PRODUCTION ASSETS</div>
+        <h1>Make your iOS artwork<br /><em>the right size, automatically.</em></h1>
+        <p>Upload one image. The tool crops intelligently, runs Real-ESRGAN through WebGPU when needed, applies your quiet-zone presets, and exports exact dimensions.</p>
+      </div>
+      <div class="spec-chip">9:19.5 · 3:4 · 1:1 · 2048 tile</div>
+    </section>
+
+    <section class="workspace">
+      <div class="panel upload-panel" id="dropZone">
+        <div class="upload-icon" aria-hidden="true">↥</div>
+        <div class="upload-title">Drop your source image here</div>
+        <div class="upload-sub">PNG, JPEG or WebP · processed in your browser</div>
+        <button class="primary" id="browseBtn">Choose image</button>
+        <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+        <div class="privacy-note">Your image never needs to be uploaded to a server. Only the AI model file is fetched on first use.</div>
+      </div>
+
+      <aside class="panel controls-panel">
+        <div class="panel-head">
+          <div>
+            <div class="panel-kicker">PROCESSING</div>
+            <h2>Settings</h2>
+          </div>
+          <button class="ghost" id="resetBtn" type="button">Reset</button>
+        </div>
+
+        <label class="field-label">AI upscaling</label>
+        <div class="segmented" role="group" aria-label="AI upscaling mode">
+          <button data-ai="auto" class="seg active">Auto</button>
+          <button data-ai="on" class="seg">Always</button>
+          <button data-ai="off" class="seg">Off</button>
+        </div>
+        <div class="field-help">Auto only invokes Real-ESRGAN when the source crop is smaller than the required output.</div>
+
+        <div class="field-row">
+          <div>
+            <label class="field-label" for="formatSelect">Output format</label>
+            <select id="formatSelect">
+              <option value="png">PNG</option>
+              <option value="webp">WebP</option>
+              <option value="jpeg">JPEG</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-label" for="qualityRange">Quality <span id="qualityValue">92</span></label>
+            <input id="qualityRange" type="range" min="60" max="100" value="92" />
+          </div>
+        </div>
+
+        <label class="field-label">Composition</label>
+        <div class="field-row">
+          <div>
+            <label class="mini-label" for="focalX">Horizontal focus <span id="focalValue">62%</span></label>
+            <input id="focalX" type="range" min="0" max="100" value="62" />
+          </div>
+          <div>
+            <label class="mini-label" for="showGuides">Guides</label>
+            <label class="switch"><input id="showGuides" type="checkbox" checked /><span></span></label>
+          </div>
+        </div>
+
+        <div class="model-card">
+          <div class="model-badge">GPU</div>
+          <div>
+            <strong>WebGPU AI Upscaler</strong>
+            <span id="modelStatus">Real-ESRGAN will load on demand.</span>
+          </div>
+        </div>
+
+        <button class="generate primary" id="generateBtn" disabled>Generate all four assets</button>
+        <div class="progress-wrap" id="progressWrap" hidden>
+          <div class="progress-meta"><span id="progressLabel">Preparing…</span><span id="progressPct">0%</span></div>
+          <div class="progress-track"><div class="progress-bar" id="progressBar"></div></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="results" id="resultsSection">
+      <div class="results-head">
+        <div>
+          <div class="panel-kicker">EXPORTS</div>
+          <h2>Generated assets</h2>
+        </div>
+        <button class="download-all ghost" id="downloadAllBtn" disabled>Download all · ZIP</button>
+      </div>
+      <div class="asset-grid" id="assetGrid">
+        <div class="empty-state">
+          <div class="empty-orb">✦</div>
+          <strong>Your four assets will appear here.</strong>
+          <span>Full Screen · Hero · Square · Texture</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="notes">
+      <div class="note">
+        <span class="note-index">01</span>
+        <div><strong>Exact dimensions</strong><span>1320×2868 · 1536×2048 · 1024×1024 · 2048×2048</span></div>
+      </div>
+      <div class="note">
+        <span class="note-index">02</span>
+        <div><strong>Quiet-zone aware</strong><span>Full-screen top 35% / bottom 25%; Hero bottom 40% and right-of-centre subject position.</span></div>
+      </div>
+      <div class="note">
+        <span class="note-index">03</span>
+        <div><strong>Private processing</strong><span>The image stays in the browser. No account or API key is required.</span></div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span>iOS Asset Forge · local-first browser utility</span>
+    <span>Real-ESRGAN · ONNX Runtime Web</span>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.webgpu.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js" crossorigin="anonymous"></script>
+  <script src="app.js"></script>
+</body>
+</html>
