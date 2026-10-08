@@ -171,32 +171,39 @@ function highQualityResize(canvas, width, height) {
 
 async function makeAsset(preset) {
   const srcCanvas = getSourceCanvas();
-  let crop = cropToAspect(srcCanvas, preset.ratio, focalX);
-  const needAI = aiMode === 'on' || (aiMode === 'auto' && (crop.width < preset.w * 0.72 || crop.height < preset.h * 0.72));
   let colorCanvas;
   let alphaCanvas = null;
   const hasAlpha = srcCanvas.getContext('2d').getImageData(0,0,1,1).data[3] < 255 || sourceFile?.type === 'image/png';
 
-  if (needAI) {
-    const aiInput = chooseAIInput(crop, preset);
-    setProgress(`AI enhancing ${preset.name}…`, progressForPreset(preset, 0.22));
-    activeAIStartedAt = performance.now();
-    colorCanvas = await runRealESRGAN(aiInput.canvas);
-    const aiSecs = ((performance.now() - activeAIStartedAt) / 1000).toFixed(1);
-    setProgress(`${preset.name} AI complete · ${aiSecs}s`, progressForPreset(preset, 0.72));
-    colorCanvas = highQualityResize(colorCanvas, preset.w, preset.h);
-    if (hasAlpha) {
-      const sourceAlpha = extractAlpha(crop);
-      alphaCanvas = highQualityResize(sourceAlpha, preset.w, preset.h);
-    }
-  } else {
-    colorCanvas = highQualityResize(crop, preset.w, preset.h);
-    if (hasAlpha) alphaCanvas = highQualityResize(extractAlpha(crop), preset.w, preset.h);
-  }
-
+  // Texture is intentionally NOT AI-upscaled and is never mirrored. The brief calls for
+  // an even-detail, seamless tile; using generative upscaling or mirrored quadrants creates
+  // obvious synthetic patterns. We extract a quiet source crop and blend the wrap seams.
   if (preset.id === 'texture') {
-    colorCanvas = seamlessMirror(colorCanvas);
-    if (alphaCanvas) alphaCanvas = seamlessMirror(alphaCanvas);
+    setProgress('Preparing natural seamless texture…', progressForPreset(preset, 0.12));
+    const textureCrop = chooseTextureCrop(srcCanvas, focalX);
+    colorCanvas = makeNaturalSeamlessTexture(textureCrop, preset.w, preset.h);
+    if (hasAlpha) alphaCanvas = highQualityResize(extractAlpha(textureCrop), preset.w, preset.h);
+    setProgress('Texture ready · no mirroring or AI generation', progressForPreset(preset, 0.82));
+  } else {
+    const crop = cropToAspect(srcCanvas, preset.ratio, focalX);
+    const needAI = aiMode === 'on' || (aiMode === 'auto' && (crop.width < preset.w * 0.72 || crop.height < preset.h * 0.72));
+
+    if (needAI) {
+      const aiInput = chooseAIInput(crop, preset);
+      setProgress(`AI enhancing ${preset.name}…`, progressForPreset(preset, 0.22));
+      activeAIStartedAt = performance.now();
+      colorCanvas = await runRealESRGAN(aiInput.canvas);
+      const aiSecs = ((performance.now() - activeAIStartedAt) / 1000).toFixed(1);
+      setProgress(`${preset.name} AI complete · ${aiSecs}s`, progressForPreset(preset, 0.72));
+      colorCanvas = highQualityResize(colorCanvas, preset.w, preset.h);
+      if (hasAlpha) {
+        const sourceAlpha = extractAlpha(crop);
+        alphaCanvas = highQualityResize(sourceAlpha, preset.w, preset.h);
+      }
+    } else {
+      colorCanvas = highQualityResize(crop, preset.w, preset.h);
+      if (hasAlpha) alphaCanvas = highQualityResize(extractAlpha(crop), preset.w, preset.h);
+    }
   }
 
   const format = $('formatSelect').value;
@@ -208,6 +215,105 @@ async function makeAsset(preset) {
     url: URL.createObjectURL(blob),
     filename: `${slugify(preset.name)}-${preset.w}x${preset.h}.${format}`,
   };
+}
+
+function chooseTextureCrop(srcCanvas, preferredX = 0.5) {
+  const sw = srcCanvas.width, sh = srcCanvas.height;
+  const side = Math.max(256, Math.floor(Math.min(sw, sh) * 0.72));
+  if (side >= Math.min(sw, sh) - 2) return cropToAspect(srcCanvas, 1, preferredX);
+
+  // Sample a compact grid of candidate crops and prefer low-frequency, evenly textured areas.
+  // This avoids grabbing a column, person, building edge, or other focal subject from a hero photo.
+  const candidates = [];
+  const maxX = sw - side, maxY = sh - side;
+  const xs = [0, .2, .4, .6, .8, 1].map(t => Math.round(maxX * t));
+  const ys = [0, .25, .5, .75, 1].map(t => Math.round(maxY * t));
+  for (const x of xs) for (const y of ys) {
+    const c = document.createElement('canvas'); c.width = side; c.height = side;
+    c.getContext('2d').drawImage(srcCanvas, x, y, side, side, 0, 0, side, side);
+    const score = textureCropScore(c, x / Math.max(1,maxX), y / Math.max(1,maxY), preferredX);
+    candidates.push({ c, score });
+  }
+  candidates.sort((a,b) => a.score - b.score);
+  return candidates[0].c;
+}
+
+function textureCropScore(canvas, xNorm, yNorm, preferredX) {
+  const small = document.createElement('canvas'); small.width = 32; small.height = 32;
+  const ctx = small.getContext('2d', { willReadFrequently:true });
+  ctx.drawImage(canvas, 0, 0, 32, 32);
+  const d = ctx.getImageData(0,0,32,32).data;
+  const lum = new Float32Array(32*32);
+  let mean = 0;
+  for (let i=0,p=0; i<d.length; i+=4,p++) {
+    const v = (0.2126*d[i] + 0.7152*d[i+1] + 0.0722*d[i+2]) / 255;
+    lum[p] = v; mean += v;
+  }
+  mean /= lum.length;
+  let variance = 0, edge = 0;
+  for (let y=0; y<32; y++) for (let x=0; x<32; x++) {
+    const i=y*32+x, v=lum[i]; variance += (v-mean)*(v-mean);
+    if (x) edge += Math.abs(v-lum[i-1]);
+    if (y) edge += Math.abs(v-lum[i-32]);
+  }
+  variance /= lum.length;
+  edge /= (32*31*2);
+  // We want enough texture to avoid a dead-flat patch, but not enough edge energy to look like a photo subject.
+  const targetEdge = 0.055, targetVar = 0.018;
+  const focusPenalty = Math.abs(xNorm - preferredX) * 0.025;
+  const edgePenalty = Math.abs(edge - targetEdge) * 0.9;
+  const varPenalty = Math.abs(variance - targetVar) * 0.28;
+  return edgePenalty + varPenalty + focusPenalty;
+}
+
+function makeNaturalSeamlessTexture(sourceCrop, width, height) {
+  const baseSize = 1024;
+  let tile = highQualityResize(sourceCrop, baseSize, baseSize);
+  const w = tile.width, h = tile.height;
+
+  // Shift the source so tile seams are in the middle, not at its original borders.
+  const shifted = document.createElement('canvas'); shifted.width = w; shifted.height = h;
+  const sctx = shifted.getContext('2d');
+  sctx.drawImage(tile, w/2, h/2, w/2, h/2, 0, 0, w/2, h/2);
+  sctx.drawImage(tile, 0, h/2, w/2, h/2, w/2, 0, w/2, h/2);
+  sctx.drawImage(tile, w/2, 0, w/2, h/2, 0, h/2, w/2, h/2);
+  sctx.drawImage(tile, 0, 0, w/2, h/2, w/2, h/2, w/2, h/2);
+
+  // Feather only the cross-shaped seam area. This removes the wrap discontinuity without mirroring the photo.
+  const blur = document.createElement('canvas'); blur.width = w; blur.height = h;
+  const bctx = blur.getContext('2d');
+  bctx.filter = 'blur(22px)';
+  bctx.drawImage(shifted, 0, 0);
+  bctx.filter = 'none';
+
+  const mask = document.createElement('canvas'); mask.width=w; mask.height=h;
+  const mctx = mask.getContext('2d');
+  const band = Math.round(w * 0.14);
+  const center = w/2;
+  const gradV = mctx.createLinearGradient(center-band,0,center+band,0);
+  gradV.addColorStop(0, 'rgba(255,255,255,0)');
+  gradV.addColorStop(.35, 'rgba(255,255,255,.88)');
+  gradV.addColorStop(.5, 'rgba(255,255,255,1)');
+  gradV.addColorStop(.65, 'rgba(255,255,255,.88)');
+  gradV.addColorStop(1, 'rgba(255,255,255,0)');
+  mctx.fillStyle = gradV; mctx.fillRect(center-band,0,band*2,h);
+  const gradH = mctx.createLinearGradient(0,center-band,0,center+band);
+  gradH.addColorStop(0, 'rgba(255,255,255,0)');
+  gradH.addColorStop(.35, 'rgba(255,255,255,.88)');
+  gradH.addColorStop(.5, 'rgba(255,255,255,1)');
+  gradH.addColorStop(.65, 'rgba(255,255,255,.88)');
+  gradH.addColorStop(1, 'rgba(255,255,255,0)');
+  mctx.fillStyle = gradH; mctx.fillRect(0,center-band,w,band*2);
+
+  bctx.globalCompositeOperation = 'destination-in';
+  bctx.drawImage(mask,0,0);
+  bctx.globalCompositeOperation = 'source-over';
+
+  const result = document.createElement('canvas'); result.width=w; result.height=h;
+  const rctx = result.getContext('2d');
+  rctx.drawImage(shifted,0,0);
+  rctx.drawImage(blur,0,0);
+  return highQualityResize(result, width, height);
 }
 
 function chooseAIInput(crop, preset) {

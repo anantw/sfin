@@ -42,3 +42,8 @@ See `licenses/REAL_ESRGAN_BSD_3_CLAUSE.txt` for the model attribution notice.
 
 ### Performance update
 This version uses the compact Real-ESRGAN general x4v3 model (~4.6 MB) instead of the 32 MB x4plus FP16 model. The model is downloaded only when AI is actually needed, shows download progress, prefers WebGPU, and falls back to WASM. Auto mode uses AI only when the source crop is materially below the required output size; otherwise it uses high-quality browser resizing for speed.
+
+## Texture behavior (v4)
+The Texture preset is deliberately different from the photo presets. It does not call Real-ESRGAN and it never mirrors the image into quadrants. It chooses a quiet, even-detail square crop, shifts the wrap seam to the center, feathers the seam with a soft blend, and then scales to 2048×2048. This preserves photographic character and avoids the synthetic mirrored look.
+
+For the Stele brief, `bg_marble` should ideally be generated from a dedicated marble source image; a coastal hero photograph should not be algorithmically turned into white marble.
